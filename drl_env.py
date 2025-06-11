@@ -1,74 +1,94 @@
 import gym
 import numpy as np
+import pandas as pd
+from decimal import Decimal
 from gym import spaces
-from capital_manager import CapitalManager
 
 
 class DogeTradingEnv(gym.Env):
-    def __init__(self, df, initial_fiat=10000.0, fee_rate=0.001):
+    def __init__(self, df: pd.DataFrame, initial_fiat=10000.0):
         super(DogeTradingEnv, self).__init__()
-
         self.df = df.reset_index(drop=True)
-        self.capital_manager = CapitalManager(initial_fiat=initial_fiat, fee_rate=fee_rate)
-        self.current_step = 50  # Start after feature burn-in
-        self.window_size = 50
+        self.initial_fiat = Decimal(str(initial_fiat))
 
-        # Action space: 0 = Hold, 1 = Buy, 2 = Sell
-        self.action_space = spaces.Discrete(3)
+        self.action_space = spaces.Discrete(3)  # 0: Hold, 1: Buy, 2: Sell
+        self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(5,), dtype=np.float32)
 
-        # Observation: close prices + volume % change + SMA ratio
-        self.observation_space = spaces.Box(
-            low=-np.inf,
-            high=np.inf,
-            shape=(self.window_size, 4),
-            dtype=np.float32
-        )
+        self._reset_portfolio()
+        self.current_step = 50  # Start after enough data for indicators
 
-        self.done = False
-
-    def _get_obs(self):
-        window = self.df.iloc[self.current_step - self.window_size:self.current_step]
-        close = window['close'].pct_change().fillna(0).values
-        volume = window['volume'].pct_change().fillna(0).values
-        sma_10 = window['close'].rolling(10).mean().fillna(method='bfill')
-        sma_50 = window['close'].rolling(50).mean().fillna(method='bfill')
-        sma_ratio = (sma_10 / sma_50).fillna(1).values
-        return np.vstack([close, volume, sma_ratio, sma_ratio]).T.astype(np.float32)
-
-    def step(self, action):
-        if self.done:
-            return self._get_obs(), 0.0, self.done, {}
-
-        row = self.df.iloc[self.current_step]
-        timestamp = row['timestamp']
-        price = row['close']
-
-        reward = 0.0
-
-        if action == 1 and self.capital_manager.fiat >= 1.0:
-            invest_amount = self.capital_manager.fiat * 0.10
-            self.capital_manager.buy(invest_amount, price, timestamp)
-        elif action == 2 and self.capital_manager.doge > 0:
-            cost = self.capital_manager.get_portfolio_summary(price).get('avg_cost', price)
-            if price > cost:
-                self.capital_manager.sell(self.capital_manager.doge, price, timestamp)
-
-        self.current_step += 1
-        if self.current_step >= len(self.df):
-            self.done = True
-
-        # Reward = net ROI change, penalize loss
-        summary = self.capital_manager.get_portfolio_summary(price)
-        reward = float(summary['total_roi']) - 0.002 * abs(float(summary['unrealized_gain']))
-
-        return self._get_obs(), reward, self.done, {}
+    def _reset_portfolio(self):
+        self.fiat = self.initial_fiat
+        self.doge = Decimal("0")
+        self.avg_cost = Decimal("0")
+        self.trades = []
 
     def reset(self):
-        self.capital_manager = CapitalManager()
+        self._reset_portfolio()
         self.current_step = 50
-        self.done = False
         return self._get_obs()
 
+    def _get_obs(self):
+        if self.current_step >= len(self.df):
+            return np.zeros(5, dtype=np.float32)
+
+        window = self.df.iloc[self.current_step - 50:self.current_step]
+
+        sma_10 = window['close'].rolling(10).mean().bfill()
+        sma_50 = window['close'].rolling(50).mean().bfill()
+        momentum = window['close'].iloc[-1] - window['close'].iloc[-5]
+        volatility = window['close'].pct_change().rolling(10).std().iloc[-1]
+
+        obs = np.array([
+            window['close'].values[-1],
+            sma_10.values[-1],
+            sma_50.values[-1],
+            momentum,
+            volatility
+        ], dtype=np.float32)
+
+        obs = np.nan_to_num(obs, nan=0.0, posinf=1e6, neginf=-1e6)
+        return obs
+
+    def _get_price(self):
+        return Decimal(str(self.df.iloc[self.current_step]['close']))
+
+    def step(self, action):
+        price = self._get_price()
+
+        reward = Decimal("0")
+
+        if action == 1 and self.fiat > Decimal("1.0"):  # Buy
+            amount_to_spend = self.fiat * Decimal("0.10")
+            qty = amount_to_spend / price
+            self.fiat -= amount_to_spend
+            self.avg_cost = ((self.avg_cost * self.doge) + (price * qty)) / (self.doge + qty)
+            self.doge += qty
+            self.trades.append(("buy", price, self.current_step))
+
+        elif action == 2 and self.doge > Decimal("0"):  # Sell
+            self.fiat += self.doge * price
+            realized_gain = (price - self.avg_cost) * self.doge
+            reward += realized_gain
+            self.doge = Decimal("0")
+            self.avg_cost = Decimal("0")
+            self.trades.append(("sell", price, self.current_step))
+
+        self.current_step += 1
+        done = self.current_step >= len(self.df) - 1
+
+        if done:
+            obs = self._get_obs() if self.current_step < len(self.df) else np.zeros(5, dtype=np.float32)
+        else:
+            obs = self._get_obs()
+
+        unrealized = (price - self.avg_cost) * self.doge if self.doge > 0 else Decimal("0")
+        total_value = self.fiat + (self.doge * price)
+        roi = (total_value - self.initial_fiat) / self.initial_fiat
+        reward += unrealized * Decimal("0.1") + roi * Decimal("0.01")
+
+        return obs, float(reward), done, {}
+
     def render(self, mode='human'):
-        summary = self.capital_manager.get_portfolio_summary(self.df.iloc[self.current_step]['close'])
-        print(summary)
+        print(f"Step: {self.current_step}")
+        print(f"Fiat: {self.fiat:.2f}, DOGE: {self.doge:.4f}, Avg Cost: {self.avg_cost:.4f}")

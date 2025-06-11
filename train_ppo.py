@@ -6,7 +6,8 @@ import os
 
 def main():
     df = pd.read_csv("doge_1m_ohlcv.csv")
-    df['timestamp'] = pd.to_datetime(df['timestamp'])
+    df['timestamp'] = pd.to_datetime(df['date'])
+    df.drop(columns=['date'], inplace=True)
     df = df.sort_values('timestamp').reset_index(drop=True)
 
     env = DummyVecEnv([lambda: DogeTradingEnv(df)])
