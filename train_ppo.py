@@ -1,26 +1,43 @@
+# train_ppo.py
+
 import pandas as pd
-from drl_env import DogeTradingEnv
-from stable_baselines3 import PPO
-from stable_baselines3.common.vec_env import DummyVecEnv
 import os
 
-def main():
-    df = pd.read_csv("doge_1m_ohlcv.csv")
-    df['timestamp'] = pd.to_datetime(df['date'])
-    df.drop(columns=['date'], inplace=True)
-    df = df.sort_values('timestamp').reset_index(drop=True)
+from drl_env import DogeTradingEnv
+from stable_baselines3.common.vec_env import DummyVecEnv, VecTransposeImage
+from sb3_contrib.ppo_recurrent import RecurrentPPO
+from sb3_contrib.ppo_recurrent.policies import MlpLstmPolicy
 
-    env = DummyVecEnv([lambda: DogeTradingEnv(df)])
+# Load dataset
+df = pd.read_csv("doge_1m_ohlcv.csv", parse_dates=["date"])
+df = df.sort_values("date").reset_index(drop=True)
 
-    model = PPO("MlpPolicy", env, verbose=1, tensorboard_log="./ppo_doge_logs")
+# Wrap env
+def make_env():
+    return DogeTradingEnv(df)
 
-    model.learn(total_timesteps=200_000)
+env = DummyVecEnv([make_env])
 
-    # Save the model
-    os.makedirs("models", exist_ok=True)
-    model.save("models/ppo_doge")
+# Initialize model with LSTM-based policy
+model = RecurrentPPO(
+    policy=MlpLstmPolicy,
+    env=env,
+    verbose=1,
+    n_steps=128,
+    batch_size=64,
+    learning_rate=2.5e-4,
+    gamma=0.99,
+    gae_lambda=0.95,
+    ent_coef=0.01,
+    clip_range=0.2,
+    tensorboard_log="./tensorboard/"
+)
 
-    print("Training complete. Model saved to models/ppo_doge")
+# Train the model
+model.learn(total_timesteps=200_000)
 
-if __name__ == "__main__":
-    main()
+# Save the model
+os.makedirs("models", exist_ok=True)
+model.save("models/ppo_doge_recurrent")
+
+print("✅ Training complete. Model saved to models/ppo_doge_recurrent")

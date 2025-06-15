@@ -1,2 +1,2 @@
-Total PPO evaluation reward: 391681.88
+Total PPO evaluation reward: 167631.02
 Final env info: {'TimeLimit.truncated': False, 'terminal_observation': array([0.18593, 0.18593, 0.18593, 0.     , 0.     ], dtype=float32)}
