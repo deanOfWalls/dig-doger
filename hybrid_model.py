@@ -38,14 +38,28 @@ def evaluate(model, df):
     lstm_state = None
     done = False
 
+    peak_net_worth = env.net_worth
+    buy_price = None
+
     while not done:
         rsi = df.iloc[env.current_step]["rsi"]
         price = df.iloc[env.current_step]["close"]
+        net_worth = env.net_worth
 
-        if rsi < 30 and env.balance > 0:
-            action = np.array([[2.0]])  # force buy
-        elif rsi > 70 and env.doge > 0 and env.doge * price > INITIAL_BALANCE:
-            action = np.array([[0.0]])  # force sell
+        # === Risk Management ===
+
+        # Stop-loss: exit all if drawdown > 10%
+        if net_worth < peak_net_worth * 0.90 and env.doge > 0:
+            action = np.array([[0.0]])  # sell
+        # Profit-take: exit all if DOGE appreciated > 25%
+        elif buy_price and env.doge > 0 and price > buy_price * 1.25:
+            action = np.array([[0.0]])  # sell
+        # RSI override
+        elif rsi < 30 and env.balance > 0:
+            action = np.array([[2.0]])  # buy
+            buy_price = price
+        elif rsi > 70 and env.doge > 0 and price * env.doge > INITIAL_BALANCE:
+            action = np.array([[0.0]])  # sell
         else:
             action, lstm_state = model.predict(
                 obs,
@@ -55,6 +69,7 @@ def evaluate(model, df):
             )
 
         obs, reward, done, _ = env.step(action)
+        peak_net_worth = max(peak_net_worth, env.net_worth)
 
     net_worths = np.array(env.trades)
     final_value = env.net_worth
@@ -91,3 +106,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
